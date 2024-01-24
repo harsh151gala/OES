@@ -1,0 +1,354 @@
+sp_helptext MFI_Staging_GetDisbursementDetails_MFILAP_New_OTP
+
+--exec MFI_Staging_GetDisbursementDetails_MFILAP_New_OTP 'MC1093','08-Mar-2022',null,null,'','SelectLAN'        
+CREATE procEDURE dbo.MFI_Staging_GetDisbursementDetails_MFILAP_New_OTP                     
+(        
+@MCcode nvarchar(10),        
+@DisbDate nvarchar(20),         
+@ChequeNo nvarchar(1000)=null,        
+@Payment_type nvarchar(50)=null,        
+@GroupID NVARCHAR(30)=null,        
+@Action NVARCHAR(20)=null        
+)        
+AS         
+                                         
+BEGIN             
+        
+if not exists (select 1 from TBL_ONDISBFIELD_MC_Pilot a with(nolock) where a.mc_code= @MCcode)        
+begin        
+        
+        
+IF @Action='SelectLAN'        
+BEGIN        
+        
+DECLARE @ExistingGroupID NVARCHAR(40)                  
+SET @ExistingGroupID = (SELECT ISNULL(ExistingGroupID,'') FROM MFI_STAGING_GROUPDETAILS with(nolock) WHERE GROUPID = @GroupID)                     
+select ROW_NUMBER() OVER(ORDER BY [COLLECTIONOFFICERNAME],GROUPID, AccountId) AS [RANK],        
+[COLLECTIONOFFICERNAME],[GROUPID],[SUBGROUPID],[ACCOUNTID],[CLIENTNAME],[DISBURSEMENTDATE],        
+[LOANAMOUNT],[PROCFEE],[INSFEE],[INS],[INSTYPE],[CHEQUENO],[PAYMENTMODE],[CLISTATUS],[NETDISBAMOUNT]        
+,[oldLoanBalance_OS],[Principal_outstanding_Amt],[Broken_period_interest],[LocalityName],
+CAST(EMI_Amount AS bigint) AS EMI_Amount,ProductID,GLeadID,ASSOCIATEID,GroupImageStatus        
+,ClientID,OD_Receipt_Recon_Flag,OD_Receipt_Recon_Reason,DuelFlag,DocumentTypeId,checkFlag,WaiverAmt,ExistingGroupID                
+--NR-3226        
+,'N' as isValid_NACH_YN         
+,'N' as is_NACH_Upload_YN        
+--end NR-3226        
+--NR-3393        
+,'N' as isValid_UPI_Mandate_YN         
+,'N' as is_UPI_Mandate_YN        
+,BANKIFSC         
+--end NR-3393        
+--NR-4001                                        
+,isValidateNo                                        
+,ValidateNo_YN                  
+,IsEsignCompleted                  
+,isEsign                   
+                  
+                  
+                
+                
+,'N' as disb_YN                                      
+,'N' undisb_YN                                      
+--NR-4001 end                                        
+      
+,PerpetualFlag,GROUPIDold,GroupidNew,GROUPIDoldDisplay               
+into #temp1        
+from (        
+select distinct         
+a.Collectionofficername,CASE WHEN (a.Groupid IS NULL) THEN '0000' ELSE a.Groupid END AS Groupid,        
+CASE WHEN (A.SUBGROUPID IS NULL) THEN '0000' ELSE A.SUBGROUPID END AS SUBGROUPID,        
+a.AccountId,                                      
+a.ClientName, convert(NVARCHAR(20),a.Disbursementdate,103) Disbursementdate ,                          
+a.LoanAmount,isnull(a.ProcFee,0)ProcFee,isnull(a.InsFEE,0)InsFEE,isnull(a.Ins,0)Ins,a.InsType,a.ChequeNO,UPPER(c.PaymentMode) as PaymentMode,        
+CASE WHEN ISNULL((SELECT TOP 1 CENTERID FROM MFI_STAGING_DISBPILOTMC  D WITH(NOLOCK) WHERE D.CENTERID=B.CENTREID),'')<>'' THEN        
+ISNULL((SELECT TOP 1 LOANACCOUNTNO FROM MFI_STAGING_CLIDOCUMENTS E WITH(NOLOCK) WHERE E.LOANACCOUNTNO=C.LOANACCOUNTNO),'')        
+ELSE '1' END AS CLISTATUS,         
+isnull(a.LoanAmount,0)-(isnull(a.ProcFee,0)+isnull(a.InsFEE,0)+isnull(e.oldLoanBalance_OS,0)+ isnull(A.EMI_Amount,0)-isnull(e.moratintowaiver,0)) AS [NETDISBAMOUNT],        
+(isnull(e.oldLoanBalance_OS,0)- isnull(e.moratintowaiver,0)) as [oldLoanBalance_OS],isnull(e.Principal_outstanding_Amt,0) as Principal_outstanding_Amt ,isnull(e.Broken_period_interest,0) as Broken_period_interest,        
+VM.VILLAGENAME+'('+B.VILLAGE+')' AS [LocalityName],  isnull(A.EMI_Amount,0) AS EMI_Amount ,C.ProductID,b.GLeadID,c.CreatedBy as ASSOCIATEID,        
+        
+        
+case when c.ProductID <> 'MTRP' then '1'    
+when b.CentreID in (select mccode from tbl_esign_disb_mcmapping where isactive = 1) then '1'  --ML-2434      
+when c.ProductID IN ('MTRP') then (CASE WHEN EXISTS(SELECT 1 FROM MFI_Staging_ScanDocuments with(nolock) WHERE groupid=c.groupid AND DOCUMENTTYPEID='MTRP_New_Consent_From') THEN '1' ELSE '0' END) end      
+ AS GroupImageStatus,        
+--'1' AS GroupImageStatus,  --added by somnath        
+        
+        
+case when c.ProductID <> 'MTRP' then 'Y'        
+     when c.ProductID ='MTRP' and (e.OD_Receipt_Flag ='Y' AND e.ReconFlag='Y') Then 'Y' else 'N' end OD_Receipt_Recon_Flag,        
+        
+        
+case when c.ProductID <> 'MTRP' then 'Y'        
+  --ML-2434 start  
+      when c.ProductID ='MTRP' and ((e.OD_Receipt_Flag ='N') or (isnull(e.OD_Receipt_Flag,'') ='')) and ((e.ReconFlag='N') or (isnull(e.ReconFlag,'') ='')) Then 'EMI and Recon Pending'             
+      when c.ProductID ='MTRP' and ((e.OD_Receipt_Flag ='N') or (isnull(e.OD_Receipt_Flag,'') ='')) Then 'EMI Pending'            
+      when c.ProductID ='MTRP' and ((e.ReconFlag='N') or (isnull(e.ReconFlag,'') ='')) Then 'Recon Pending'     
+   --ML-2434 end  
+  
+else '' end OD_Receipt_Recon_Reason,        
+        
+        
+ isnull(d.DuelMatchesFlag,'') as  DuelFlag ,  
+  CASE when isnull(d.DuelMatchesFlag,'') in('same','NA') then '1'          
+     when isnull(d.DuelMatchesFlag,'')='dual' and C.DualNameconsent_YN='Y' THEN '1' ELSE '0'  END AS DocumentTypeId,               
+  'Y' As checkFlag,        
+  c.ClientID,        
+  isnull(e.moratintowaiver,0) As WaiverAmt, c.ExistingGroupID         
+--isnull(ML.WaiverAmt,0) As WaiverAmt, c.ExistingGroupID                                          
+--NR-4001 Esign validate no               
+,case when exists(select 1 from tbl_esign_disb_mcmapping with(nolock) where mccode=@MCcode and isactive='1')                                         
+then                                        
+case when (select count(*) from tbl_esign_disb_mobilevalidate_details s1 with(nolock)                                        
+where s1.clientid=c.clientid and s1.isApplicant in('A','C'))=1                                        
+then 'N' else 'Y' end                                        
+else 'N' end as isValidateNo                                        
+,case when (select count(*) from tbl_esign_disb_mobilevalidate_details s1 with(nolock)                                        
+where s1.clientid=c.clientid and s1.isApplicant in('Y','N'))=1                                        
+then 'Y' else 'N' end                                        
+as ValidateNo_YN                     
+--edit ended by sujitha            
+--added by Sujitha                  
+,case when c.App_esign_flag = 'Y' and c.CoApp_esign_flag = 'Y' then 'Y' else 'N' end as IsEsignCompleted                  
+--end by Sujitha                  
+,case when exists(select 1 from tbl_esign_disb_mcmapping with(nolock) where mccode=@MCcode and isactive='1')                                       
+then 'Y' else 'N' end as isEsign                                      
+--end by abhay                     
+                  
+                
+                                       
+--NR-3393 UPI Mandate        
+,upper(rtrim(isnull(isnull(bc.IFSC_OPSP,bc.IFSC_OPS),bc.ifsccode))) as BANKIFSC        
+     --NR-3842        
+ , Case when b.ExistingGroupID is null then 'N'         
+ when b.ExistingGroupID  = '' then 'N'        
+ else 'P' end  as PerpetualFlag                               
+  ,b.ExistingGroupID  AS GROUPIDold ,b.GROUPID as GroupidNew --,            
+ -- Case when b.ExistingGroupID is null then '' else  CONCAT(b.ExistingGroupID , ' ', ('(Perpetual)')) end  as GROUPIDoldDisplay            
+            
+     ,CASE when b.ExistingGroupID is null then  b.GROUPID         
+  when b.ExistingGroupID = '' then  b.GROUPID        
+  else CONCAT(b.ExistingGroupID , ' ', ('(Perpetual)')) end  AS GROUPIDolddisplay          
+from dbo.MFI_Disbursement_details a with(nolock)         
+INNER JOIN mfi_staging_groupdetails b with(nolock) ON a.GroupID=b.GroupID        
+INNER JOIN mfi_staging_loandetails c with(nolock) ON  a.GroupID=c.GroupID and c.LoanAccountNo=a.AccountID        
+--inner join mfi_staging_bankaccountdetails bc with(nolock) on c.clientid=bc.clientid        
+INNER JOIN mfi_staging_customerdetails d with(nolock) ON  c.clientid=d.clientid        
+LEFT JOIN LMS_MIDTERMLOANWORKFLOW e wITH(NOLOcK) oN e.NewLoanAcNo=C.LoanAccountNo        
+INNER JOIN tbl_VillageMaster VM with(nolock) ON VM.LocalityID =b.Village         
+left JOIN MFI_Staging_MidTermLeadDetails ML with(nolock) On ML.ClientID=c.LeadID                                          
+left join MFI_STAGING_BANKACCOUNTDETAILS bc with(nolock) on a.ClientID=bc.ClientID                                      
+--INNER JOIN LMS_OnBoardingWorkFlow WF WITH(NOLOCK) ON WF.LoanAccountNo=C.LoanAccountNo        
+where b.centreid=@MCcode and  a.Disbursementdate=@DisbDate AND a.GroupID=@GroupID        
+AND C.LOANSTATUSID='OPAP'        
+AND B.GROUPSTATUS='OPAP'        
+AND ISNULL(C.PaymentMode,'') <>''        
+AND NOT EXISTS         
+(        
+SELECT 1 FROM MFI_Staging_Disb_dtl  with(nolock)         
+where  A.ACCOUNTID=ACCOUNTID AND A.APPLICATIONID=APPLICATIONID        
+AND ClientID=a.ClientID         
+AND ((ISNULL(WITHDRAWAL_YN,'Y')='Y' AND [CHECK]='Y') OR (ISNULL(WITHDRAWAL_YN,'N')='N' AND DISB_YN='N' AND[CHECK]='N'))          
+          
+)        
+--AND WF.PreBoarding_UploadStatus='C'        
+) as data        
+        
+         
+--update #TEMP1 set checkFlag='N' where OD_Receipt_Recon_Flag='N' or DocumentTypeId='0' or GroupImageStatus='0'  --commented for wet sign by sujitha    
+update #TEMP1 set checkFlag='N' where OD_Receipt_Recon_Flag='N' or GroupImageStatus='0'      
+        
+--NR-4001 Esign update already disb-undisb marked lans in grid                                        
+update A set A.disb_YN=isnull(B.marked_disb,'N')                                        
+,A.undisb_YN=isnull(B.marked_undisb,'N')                                        
+from #TEMP1 A                                        
+inner join tbl_esign_disb_undisb_details B with(nolock) on A.AccountID=B.lanid                                        
+inner join tbl_esign_disb_mcmapping C with(nolock) on B.mccode=C.mccode                   
+where C.mccode=@MCcode and c.isactive='1'                                        
+--NR-4001 end          
+--NR-3226 NACH Mandate        
+update A set isValid_NACH_YN=        
+case when exists(select 1 from tbl_NACH_MCMapping with(nolock) where executive_id=@MCcode) then         
+case when not exists(select 1 from tbl_NACHForm_UploadDetails with(nolock) where lanid=A.AccountID) then        
+case when not exists(select 1 from tbl_UPIMandateRegistrationDetails with(nolock) where loanaccountno=A.AccountID and current_status='register_success'        
+union select 1 from tbl_UPIMandateWebhookResponse with(nolock) where loanaccountno=A.AccountID and current_status='register_success')         
+then 'Y'        
+else 'N' end        
+else 'N' end        
+else 'N' end        
+,is_NACH_Upload_YN=        
+case when exists(select 1 from tbl_NACHForm_UploadDetails with(nolock) where lanid=A.AccountID)        
+then 'Y'        
+else 'N' end        
+from #TEMP1 A        
+        
+--NR-3393        
+update A set isValid_UPI_Mandate_YN=        
+case when exists(select 1 from tbl_UPIMandate_MCMapping with(nolock) where executive_id=@MCcode) then         
+case when exists(select 1 from tbl_UPIMandateBankDetails with(nolock) where upper(rtrim(bankcodes))=left(A.BANKIFSC,4)) then        
+case when not exists(select 1 from tbl_UPIMandateRegistrationDetails with(nolock) where loanaccountno=A.AccountID and current_status='register_success'        
+union select 1 from tbl_UPIMandateWebhookResponse with(nolock) where loanaccountno=A.AccountID and current_status='register_success') then        
+case when not exists(select 1 from tbl_NACHForm_UploadDetails with(nolock) where lanid=A.AccountID) then 'Y'        
+else 'N' end        
+else 'N' end        
+else 'N' end        
+else 'N' end        
+,is_UPI_Mandate_YN=        
+case when not exists(select 1 from tbl_UPIMandateRegistrationDetails with(nolock) where loanaccountno=A.AccountID and current_status='register_success'        
+union select 1 from tbl_UPIMandateWebhookResponse with(nolock) where loanaccountno=A.AccountID and current_status='register_success') then 'Y'        
+else 'N' end        
+from #TEMP1 A        
+      
+inner join mfi_staging_loandetails B with(nolock) on A.AccountID=B.loanaccountno                                      
+inner join MFI_Staging_BankAccountDetails C with(nolock) on B.clientid=C.clientid         
+--new loan req form enable/disable logic      
+    
+SELECT A.[RANK],A.[COLLECTIONOFFICERNAME],A.[GROUPID],A.[SUBGROUPID],A.[ACCOUNTID],A.[CLIENTNAME],A.[DISBURSEMENTDATE],        
+A.[LOANAMOUNT],A.[PROCFEE],A.[INSFEE],A.[INS],A.[INSTYPE],A.[CHEQUENO],A.[PAYMENTMODE],A.[CLISTATUS],A.[NETDISBAMOUNT]        
+, A.[oldLoanBalance_OS],        
+A.[Principal_outstanding_Amt],A.[Broken_period_interest],A.ClientID,A.[LocalityName],[EMI_Amount],[ProductID],[GLeadID], ASSOCIATEID,GroupImageStatus        
+        
+,CASE WHEN ISNULL(B.MobileNo_OTP,'')<>'' THEN 'Y' ELSE 'N' END AS OTPFlag,        
+A.OD_Receipt_Recon_Flag,        
+A.OD_Receipt_Recon_Reason,        
+A.DuelFlag,        
+A.DocumentTypeId,        
+checkFlag,        
+A.WaiverAmt        
+,A.ExistingGroupID                  
+--,'N' AS OTPFlag        
+--NR-3226        
+,isValid_NACH_YN         
+,is_NACH_Upload_YN         
+--end NR-3226        
+--NR-3393        
+,isValid_UPI_Mandate_YN        
+,is_UPI_Mandate_YN        
+--end NR-3393        
+--NR-4001 Esign validateno                                        
+,isValidateNo                                        
+,ValidateNo_YN                                        
+,disb_YN                                      
+,undisb_YN                                      
+,isEsign                                      
+--end by abhay       
+                 
+,IsEsignCompleted     
+                                   
+,PerpetualFlag,GROUPIDold,GroupidNew,GROUPIDoldDisplay                
+FROM #TEMP1 A        
+--left join OTP_Validated_MobileNo B on A.ClientID=B.ClientID        
+left JOIN MFI_STAGING_MOBILITY_MOBILE_NUMBER B on A.AccountID=B.AccountNo        
+        
+--select 'Y' AS ISValidateOTP        
+        
+drop table #TEMP1        
+        
+END        
+ELSE        
+BEGIN        
+         
+select ROW_NUMBER() OVER(ORDER BY [COLLECTIONOFFICERNAME],GROUPID, AccountId) AS [RANK],        
+[COLLECTIONOFFICERNAME],[GROUPID],[SUBGROUPID],[ACCOUNTID],[CLIENTNAME],[DISBURSEMENTDATE],        
+[LOANAMOUNT],[PROCFEE],[INSFEE],[INS],[INSTYPE],[CHEQUENO],[PAYMENTMODE],[CLISTATUS],[NETDISBAMOUNT]        
+,[oldLoanBalance_OS],[Principal_outstanding_Amt],[Broken_period_interest],[FirstInstallmentDate],[LocalityName],ProductID,CenterID        
+,ExistingGroupId,ExistingGrpAppCnt                  
+--NR-4001 Esign                                      
+,isEsign                                      
+,Esign_YN                                      
+--end by abhay                   
+        
+,PerpetualFlag,GROUPIDold,GroupidNew,GROUPIDoldDisplay            
+into #temp                  
+from (                  
+                   
+select distinct                   
+a.Collectionofficername,CASE WHEN (a.Groupid IS NULL) THEN '0000' ELSE a.Groupid END AS Groupid,                  
+CASE WHEN (A.SUBGROUPID IS NULL) THEN '0000' ELSE A.SUBGROUPID END AS SUBGROUPID,                  
+a.AccountId,                                                
+a.ClientName, convert(NVARCHAR(20),a.Disbursementdate,103) Disbursementdate ,                                    
+a.LoanAmount,isnull(a.ProcFee,0)ProcFee,isnull(a.InsFEE,0)InsFEE,isnull(a.Ins,0)Ins,a.InsType,a.ChequeNO,UPPER(c.PaymentMode) as PaymentMode,                  
+CASE WHEN ISNULL((SELECT TOP 1 CENTERID FROM MFI_STAGING_DISBPILOTMC  D WITH(NOLOCK) WHERE D.CENTERID=B.CENTREID),'')<>'' THEN                  
+ISNULL((SELECT TOP 1 LOANACCOUNTNO FROM MFI_STAGING_CLIDOCUMENTS E WITH(NOLOCK) WHERE E.LOANACCOUNTNO=C.LOANACCOUNTNO),'')                  
+ELSE '1' END AS CLISTATUS,                   
+isnull(a.LoanAmount,0)-(isnull(a.ProcFee,0)+isnull(a.InsFEE,0)+isnull(e.oldLoanBalance_OS,0)+   isnull(A.EMI_Amount,0)) AS [NETDISBAMOUNT],                  
+isnull(e.oldLoanBalance_OS,0)         
+as [oldLoanBalance_OS]        
+,isnull(e.Principal_outstanding_Amt,0) as Principal_outstanding_Amt ,isnull(e.Broken_period_interest,0) as Broken_period_interest                  
+--,b.FirstInstallmentDate           
+,case when  b.ExistingGroupID is null then b.FirstInstallmentDate            
+else (select FirstInstallmentDate from mfi_staging_groupdetails where groupid = b.ExistingGroupID  ) end as FirstInstallmentDate                
+,VM.VILLAGENAME+'('+B.VILLAGE+')' AS [LocalityName],B.ProductID AS ProductID,null AS CenterID, '' as ExistingGroupId ,                  
+(SELECT COUNT(*) FROM MFI_STAGING_LOANDETAILS LD2  with(nolock) WHERE LD2.LOANSTATUSID='OPAP' AND LD2.GROUPID=b.GroupID  AND LD2.CREDIT_REJ IS NULL) AS ExistingGrpAppCnt                  
+--NR-4001 Esign                                      
+,case when exists(select 1 from tbl_esign_disb_mcmapping with(nolock) where mccode=@MCcode and isactive='1')              then                                      
+case when isnull(b.esign_flag,'N')='Y'                                      
+then 'N' else 'Y' end                                       
+else 'N' end as isEsign                                      
+,case when isnull(b.esign_flag,'N')='Y'                                      
+then 'Y' else 'N' end as Esign_YN,                                      
+--end by abhay                  
+--added by Sujitha                  
+--case when c.App_esign_flag = 'Y' and c.CoApp_esign_flag = 'Y' then 'Y' else 'N' end as IsEsignCompleted,                  
+--end by Sujitha                              
+--NR-3842        
+Case when b.ExistingGroupID is null then 'N'        
+when b.ExistingGroupID  = '' then 'N'        
+ else 'P' end  as PerpetualFlag                               
+  ,b.ExistingGroupID  AS GROUPIDold ,b.GROUPID as GroupidNew --,            
+ -- Case when b.ExistingGroupID is null then '' else  CONCAT(b.ExistingGroupID , ' ', ('(Perpetual)')) end  as GROUPIDoldDisplay               
+  ,CASE when b.ExistingGroupID is null then  b.GROUPID         
+  when b.ExistingGroupID = '' then  b.GROUPID        
+  else CONCAT(b.ExistingGroupID , ' ', ('(Perpetual)')) end  AS GROUPIDolddisplay          
+        
+            
+from dbo.MFI_Disbursement_details a with(nolock)                   
+INNER JOIN mfi_staging_groupdetails b with(nolock) ON a.GroupID=b.GroupID                  
+INNER JOIN mfi_staging_loandetails c with(nolock) ON  a.GroupID=c.GroupID and c.LoanAccountNo=a.AccountID                  
+INNER JOIN mfi_staging_customerdetails d with(nolock) ON  c.clientid=d.clientid                  
+LEFT JOIN LMS_MIDTERMLOANWORKFLOW e wITH(NOLOcK) oN e.NewLoanAcNo=C.LoanAccountNo                  
+INNER JOIN tbl_VillageMaster VM with(nolock) ON VM.LocalityID =b.Village                   
+--INNER JOIN LMS_OnBoardingWorkFlow WF WITH(NOLOCK) ON WF.LoanAccountNo=C.LoanAccountNo                  
+where b.centreid=@MCcode and a.Disbursementdate=@DisbDate                  
+AND C.LOANSTATUSID='OPAP'                  
+AND B.GROUPSTATUS='OPAP'                 
+AND ISNULL(C.PaymentMode,'') <>''                  
+AND NOT EXISTS                   
+(                  
+SELECT 1 FROM MFI_Staging_Disb_dtl  with(nolock)                   
+where  A.ACCOUNTID=ACCOUNTID AND A.APPLICATIONID=APPLICATIONID                  
+AND ClientID=a.ClientID                   
+AND ((ISNULL(WITHDRAWAL_YN,'Y')='Y' AND [CHECK]='Y') OR (ISNULL(WITHDRAWAL_YN,'N')='N' AND DISB_YN='N' AND[CHECK]='N'))                    
+                    
+)                  
+--AND WF.PreBoarding_UploadStatus='C'                  
+) as data                  
+                  
+                     
+SELECT Row_number() over(order by Groupid ) AS [RANK],[COLLECTIONOFFICERNAME],[GROUPID],[SUBGROUPID],'0' AS [ACCOUNTID],'0' AS [CLIENTNAME],[DISBURSEMENTDATE],                  
+'0' AS [LOANAMOUNT],'0' AS [PROCFEE],'0' AS [INSFEE],'0' AS [INS],'' AS [INSTYPE],NULL AS [CHEQUENO],'' AS [PAYMENTMODE],'' AS [CLISTATUS],                  
+'0' AS [NETDISBAMOUNT],sUM([oldLoanBalance_OS]) AS  [oldLoanBalance_OS],                  
+sUM([Principal_outstanding_Amt]) AS [Principal_outstanding_Amt],sUM([Broken_period_interest]) AS [Broken_period_interest]                  
+,convert(varchar(10),FirstInstallmentDate,103) AS FirstInstallmentDate,[LocalityName], ProductID,CenterID,ExistingGroupId,ExistingGrpAppCnt              
+--NR-4001 Esign                                      
+,isEsign                                      
+,Esign_YN                                          
+--end by abhay                  
+                 
+         
+,PerpetualFlag,GROUPIDold,GroupidNew,GROUPIDoldDisplay                 
+FROM #TEMP                   
+GROUP BY [GROUPID],[SUBGROUPID],[COLLECTIONOFFICERNAME],[DISBURSEMENTDATE],FirstInstallmentDate,[LocalityName], ProductID,CenterID,ExistingGroupId,ExistingGrpAppCnt                      
+--NR-4001 Esign                                      
+,isEsign                                      
+,Esign_YN                                  
+--end by abhay                  
+                
+,PerpetualFlag,GROUPIDold,GroupidNew,GROUPIDoldDisplay            
+ORDER BY [RANK],[COLLECTIONOFFICERNAME],[GROUPID] ,[SUBGROUPID],[DISBURSEMENTDATE]                  
+                  
+ drop table #temp                      
+ END                  
+end                 
+                    
+END
